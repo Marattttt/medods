@@ -22,6 +22,10 @@ func main() {
 
 	}
 
+	if config.Conf.Mode.IsDebug() {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
+
 	printConfig(*config.Conf)
 
 	go func() {
