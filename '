@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"marat/medodsauth/config"
+	"marat/medodsauth/models"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
-
-var ErrTokenExprired = fmt.Errorf("Token expired")
 
 type TokenPair struct {
 	Access  string `json:"access"`
@@ -153,7 +152,7 @@ func HashRefreshTok(rt RefreshToken) (string, error) {
 	return string(hashed), nil
 }
 
-func (d DefaultAuthenticator) Validate(tokenString string) (uuid.UUID, error) {
+func ValidateAccessToken(tokenString string) (uuid.UUID, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Check the signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -175,15 +174,13 @@ func (d DefaultAuthenticator) Validate(tokenString string) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("invalid claims")
 	}
 
-	d.logger.Debug("Parsed claims", slog.Any("claims", claims))
-
 	expiration, ok := claims[ExprirationClaim].(float64)
 	if !ok {
 		return uuid.Nil, fmt.Errorf("expiration claim is missing or invalid")
 	}
 	expirationTime := time.Unix(int64(expiration), 0)
 	if time.Now().After(expirationTime) {
-		return uuid.Nil, ErrTokenExprired
+		return uuid.Nil, fmt.Errorf("token has expired")
 	}
 
 	// Extract user ID claim

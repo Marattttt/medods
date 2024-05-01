@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log/slog"
+	"marat/medodsauth/config"
 	"net/http"
 	"time"
 
@@ -15,6 +16,7 @@ func addRequestData(next http.Handler) http.Handler {
 		requestLogger := slog.With(slog.Uint64("requestId", requestId))
 		ctx := context.WithValue(r.Context(), requestData{}, requestData{
 			reqId:  requestId,
+			conf:   config.Conf,
 			logger: requestLogger,
 		})
 
