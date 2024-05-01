@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"marat/medodsauth/auth"
 	"marat/medodsauth/config"
+	"marat/medodsauth/storage"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,8 +32,8 @@ func Server(conf *config.Config) *http.Server {
 
 	// Might be better to set an http mnethod, but it was not specified, so did not set any
 	mux.Handle("/login", http.HandlerFunc(HandleLogin))
-
-	mux.Handle("/validate", http.HandlerFunc(HandleTokenStatus))
+	mux.Handle("/refresh", http.HandlerFunc(HandleRefresh))
+	mux.Handle("/validate", http.HandlerFunc(HandleTokenValidate))
 
 	listenOn := fmt.Sprintf("%s:%s", conf.Server.Host, strconv.Itoa(conf.Server.Port))
 	return &http.Server{
@@ -46,27 +47,53 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		ctx     = r.Context()
 		reqData = ctx.Value(requestData{}).(requestData)
 	)
+
 	idParam := r.URL.Query().Get("id")
 	id, err := uuid.Parse(idParam)
 	if err != nil {
-		fmt.Fprintf(w, "Invalid uuid")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{"Invalid uuid"})
 		return
 	}
 
-	authenticator := auth.NewDefaultAuthenticator(config.Conf, reqData.logger)
+	authenticator := auth.NewDefault(config.Conf, storage.IMS, reqData.logger)
 
 	tokenPair := authenticator.GeneratePair(id)
 
 	if tokenPair == nil {
-		slog.Info("Did not generate auth token pair", slog.Any("id", id))
-		http.Error(w, "Could not generate token pair", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{"Could not generate token pair"})
 		return
 	}
 
-	_ = json.NewEncoder(w).Encode(tokenPair)
+	json.NewEncoder(w).Encode(tokenPair)
 }
 
-func HandleTokenStatus(w http.ResponseWriter, r *http.Request) {
+func HandleRefresh(w http.ResponseWriter, r *http.Request) {
+	var (
+		ctx     = r.Context()
+		reqData = ctx.Value(requestData{}).(requestData)
+	)
+
+	hash := r.URL.Query().Get("token")
+	if hash == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{"refresh query param not found"})
+		return
+	}
+
+	authorizer := auth.NewDefault(config.Conf, storage.IMS, reqData.logger)
+	pair, err := authorizer.Refresh(hash)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(pair)
+}
+
+func HandleTokenValidate(w http.ResponseWriter, r *http.Request) {
 	var (
 		ctx     = r.Context()
 		reqData = ctx.Value(requestData{}).(requestData)
@@ -75,27 +102,32 @@ func HandleTokenStatus(w http.ResponseWriter, r *http.Request) {
 	// Get the Authorization header value
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		http.Error(w, "no Authorization header found", http.StatusUnauthorized)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{"No Authorization header found"})
 		return
 	}
 
 	// Split the Authorization header value into parts
 	parts := strings.Split(authHeader, " ")
 	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		http.Error(w, "invalid Authorization header format", http.StatusUnauthorized)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{"Invalid Authorization header format"})
 		return
 	}
 
-	authorizer := auth.NewDefaultAuthenticator(reqData.conf, reqData.logger)
+	authorizer := auth.NewDefault(reqData.conf, storage.IMS, reqData.logger)
 	id, err := authorizer.Validate(parts[1])
 	if err != nil {
 		if errors.Is(err, auth.ErrTokenExprired) {
-			http.Error(w, "Token exprired", http.StatusUnauthorized)
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(ErrorResponse{"Token exprired"})
 			return
 		}
 
-		reqData.logger.Info("Did not authorize request", slog.String("err", err.Error()))
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{err.Error()})
+		return
 	}
 
-	json.NewEncoder(w).Encode(id)
+	json.NewEncoder(w).Encode(TokenStatusResponse{"Valid", id.String()})
 }

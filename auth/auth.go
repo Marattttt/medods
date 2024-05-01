@@ -2,10 +2,12 @@ package auth
 
 import (
 	"crypto/rand"
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"marat/medodsauth/config"
+	"marat/medodsauth/models"
+	"marat/medodsauth/storage"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -13,15 +15,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var ErrTokenExprired = fmt.Errorf("Token expired")
-
-type TokenPair struct {
-	Access  string `json:"access"`
-	Refresh string `json:"refresh"`
-}
+var (
+	ErrTokenExprired = fmt.Errorf("Token expired")
+	ErrTokenNotFound = fmt.Errorf("Token not found")
+)
 
 type ApiAuthenticator interface {
-	Generate(id uuid.UUID) TokenPair
+	Generate(id uuid.UUID) models.TokenPair
 	Verify(accessTok []byte) bool
 	Refresh(refresh []byte) (access []byte)
 }
@@ -32,25 +32,45 @@ const (
 	IssuedAtClaim    = "iat"
 )
 
-type DefaultAuthenticator struct {
-	Tokens map[uuid.UUID]string
-	logger *slog.Logger
-	conf   *config.Config
+type Default struct {
+	logger     *slog.Logger
+	conf       *config.Config
+	tokenStore storage.TokenStorage
 }
 
-func NewDefaultAuthenticator(conf *config.Config, logger *slog.Logger) DefaultAuthenticator {
-	return DefaultAuthenticator{
-		Tokens: make(map[uuid.UUID]string),
-		logger: logger,
-		conf:   conf,
+func NewDefault(conf *config.Config, store storage.TokenStorage, logger *slog.Logger) Default {
+	return Default{
+		logger:     logger,
+		conf:       conf,
+		tokenStore: store,
 	}
 }
 
-func (d DefaultAuthenticator) GeneratePair(id uuid.UUID) *TokenPair {
-	var pair TokenPair
+func (d Default) Refresh(hash string) (*models.TokenPair, error) {
+	found, err := d.tokenStore.Get(hash)
+	if err != nil {
+		if errors.Is(err, storage.ErrExpired) {
+			return nil, ErrTokenExprired
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrTokenNotFound
+		}
+		return nil, fmt.Errorf("getting token from storage: %w", err)
+	}
+
+	newPair := d.GeneratePair(found.UserId)
+
+	// Remove old token
+	d.tokenStore.Delete(hash)
+
+	return newPair, nil
+}
+
+func (d Default) GeneratePair(id uuid.UUID) *models.TokenPair {
+	var pair models.TokenPair
 
 	accessRaw := GenerateAccessTok(id)
-	slog.Debug("Generated access token", slog.Any("claims", accessRaw.Claims))
+	d.logger.Debug("Generated access token", slog.Any("claims", accessRaw.Claims))
 
 	accessHash, err := HashAccessTok(accessRaw)
 	if err != nil {
@@ -59,18 +79,23 @@ func (d DefaultAuthenticator) GeneratePair(id uuid.UUID) *TokenPair {
 	}
 	pair.Access = accessHash
 
-	refreshRaw := GenerateRefreshTok(id)
-	slog.Debug("Generated refresh token",
-		slog.String("id", refreshRaw.id.String()),
-		slog.String("issuedAt", refreshRaw.issuedAt.String()),
-		slog.String("expiresAt", refreshRaw.expiresAt.String()))
+	refreshRaw := GenerateRefreshTok()
+	d.logger.Debug("Generated refresh token",
+		slog.String("id", refreshRaw.UserId.String()),
+		slog.String("issuedAt", refreshRaw.IssuedAt.String()),
+		slog.String("expiresAt", refreshRaw.ExpiresAt.String()))
 
-	refreshHash, err := HashRefreshTok(refreshRaw)
+	refreshHash, err := HashRefreshTok(&refreshRaw)
 	if err != nil {
 		d.logger.Error("Hashing refresh token", slog.String("err", err.Error()), slog.Any("token", refreshRaw))
 	}
 
 	pair.Refresh = refreshHash
+
+	if err := d.tokenStore.Save(refreshHash, refreshRaw); err != nil {
+		d.logger.Error("Could not save refresh token", slog.String("err", err.Error()))
+		return nil
+	}
 
 	return &pair
 }
@@ -95,52 +120,28 @@ func HashAccessTok(tok *jwt.Token) (string, error) {
 	return signed, nil
 }
 
-// Refresh token used for granting access to creation of access tokens without relogin
-type RefreshToken struct {
-	id        uuid.UUID
-	issuedAt  time.Time
-	expiresAt time.Time
-}
-
-func (rt RefreshToken) Write(p []byte) (n int, err error) {
-	const maxLen = 8 + 8 + 16
-	if len(p) < maxLen {
-		return 0, fmt.Errorf("buffer too short")
-	}
-
-	written := 0
-
-	timeBuf := make([]byte, 16)
-	binary.BigEndian.PutUint64(timeBuf[:8], uint64(rt.issuedAt.Unix()))
-	binary.BigEndian.PutUint64(timeBuf[8:16], uint64(rt.expiresAt.Unix()))
-
-	written += copy(p, timeBuf)
-
-	// Copy into the remaining part
-	written += copy(p[written:], rt.id[:])
-
-	return written, nil
-}
-
-func GenerateRefreshTok(id uuid.UUID) RefreshToken {
-	return RefreshToken{
-		id:        id,
-		issuedAt:  time.Now(),
-		expiresAt: time.Now(),
+func GenerateRefreshTok() models.RefreshToken {
+	return models.RefreshToken{
+		UserId:    uuid.New(),
+		IssuedAt:  time.Now(),
+		ExpiresAt: time.Now(),
 	}
 }
 
-func HashRefreshTok(rt RefreshToken) (string, error) {
+func HashRefreshTok(rt *models.RefreshToken) (string, error) {
 	raw := make([]byte, 72)
 	n, err := rt.Write(raw)
 	if err != nil {
 		return "", fmt.Errorf("writing to buf of len %d: %w", len(raw), err)
 	}
 
-	_, err = rand.Read(raw[n:])
+	salt := make([]byte, len(raw)-n)
+	_, err = rand.Read(salt)
 	if err != nil {
 		return "", fmt.Errorf("generating random data into buffer: %w", err)
 	}
+
+	copy(raw[n:], salt)
 
 	hashed, err := bcrypt.GenerateFromPassword(raw, bcrypt.DefaultCost)
 
@@ -150,10 +151,13 @@ func HashRefreshTok(rt RefreshToken) (string, error) {
 
 	}
 
+	// Save slat to rt after checking hashing error
+	rt.Salt = salt
+
 	return string(hashed), nil
 }
 
-func (d DefaultAuthenticator) Validate(tokenString string) (uuid.UUID, error) {
+func (d Default) Validate(tokenString string) (uuid.UUID, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Check the signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -162,27 +166,20 @@ func (d DefaultAuthenticator) Validate(tokenString string) (uuid.UUID, error) {
 		return []byte(config.Conf.Server.JWTSignature), nil
 	})
 
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("parsing token: %w", err)
-	}
-
-	if !token.Valid {
+	if err != nil || !token.Valid {
 		return uuid.Nil, fmt.Errorf("token is not valid")
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok || !token.Valid {
-		return uuid.Nil, fmt.Errorf("invalid claims")
-	}
-
+	claims := token.Claims.(jwt.MapClaims)
 	d.logger.Debug("Parsed claims", slog.Any("claims", claims))
 
-	expiration, ok := claims[ExprirationClaim].(float64)
+	expirationUnix, ok := claims[ExprirationClaim].(float64)
 	if !ok {
 		return uuid.Nil, fmt.Errorf("expiration claim is missing or invalid")
 	}
-	expirationTime := time.Unix(int64(expiration), 0)
-	if time.Now().After(expirationTime) {
+
+	expiration := time.Unix(int64(expirationUnix), 0)
+	if time.Now().After(expiration) {
 		return uuid.Nil, ErrTokenExprired
 	}
 
