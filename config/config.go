@@ -32,7 +32,7 @@ func (m Mode) IsDebug() bool {
 }
 
 type ServerConfig struct {
-	Host                  string        `env:"HOST, default=127.0.0.1"`
+	Host                  string        `env:"HOST, default=0.0.0.0"`
 	Port                  int           `env:"PORT, default=3030"`
 	JWTSignature          string        `env:"JWT_SIGNATURE, default=secret"`
 	AccessTokenValidTime  time.Duration `env:"TOKEN_ACCESS_VALID_FOR, default=1h"`
