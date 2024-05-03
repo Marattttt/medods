@@ -13,6 +13,7 @@ import (
 	"syscall"
 )
 
+//go:generate swagger generate spec -o swagger.json
 func main() {
 	cancelsignals := []os.Signal{syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM}
 	appCtx, appcancel := signal.NotifyContext(context.Background(), cancelsignals...)

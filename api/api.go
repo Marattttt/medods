@@ -10,7 +10,6 @@ import (
 	"marat/medodsauth/storage"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/go-chi/chi"
@@ -34,9 +33,9 @@ func Server(conf *config.Config) *http.Server {
 	mux.Use(addRequestData, logRequestStatus, middleware.Recoverer)
 
 	// Might be better to set an http mnethod, but it was not specified, so did not set any
-	mux.Handle("/login", http.HandlerFunc(HandleLogin))
-	mux.Handle("/refresh", http.HandlerFunc(HandleRefresh))
-	mux.Handle("/validate", http.HandlerFunc(HandleTokenValidate))
+	mux.Get("/login", http.HandlerFunc(HandleLogin))
+	mux.Post("/refresh", http.HandlerFunc(HandleRefresh))
+	mux.Post("/validate", http.HandlerFunc(HandleTokenValidate))
 
 	listenOn := fmt.Sprintf("%s:%s", conf.Server.Host, strconv.Itoa(conf.Server.Port))
 	return &http.Server{
@@ -99,23 +98,14 @@ func HandleTokenValidate(w http.ResponseWriter, r *http.Request) {
 		reqData = ctx.Value(requestData{}).(requestData)
 	)
 
-	// Get the Authorization header value
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	var request ValidateRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse{"No Authorization header found"})
+		json.NewEncoder(w).Encode(ErrorResponse{"Could not decode reqest body"})
 		return
 	}
 
-	// Split the Authorization header value into parts
-	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(ErrorResponse{"Invalid Authorization header format"})
-		return
-	}
-
-	token, err := reqData.auth.ValidateAccessTok(parts[1])
+	token, err := reqData.auth.ValidateAccessTok(request.AccessToken)
 	if err != nil {
 		if errors.Is(err, auth.ErrTokenExprired) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -135,5 +125,5 @@ func HandleTokenValidate(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(ErrorResponse{"Something went wrong"})
 		return
 	}
-	json.NewEncoder(w).Encode(TokenStatusResponse{"Valid", hashedToken})
+	json.NewEncoder(w).Encode(ValidateResponse{"Valid", hashedToken})
 }
