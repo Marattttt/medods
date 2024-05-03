@@ -40,5 +40,7 @@ type ServerConfig struct {
 }
 
 type StorageConfig struct {
-	DBAddr string `env:"DBADDR, default=27017"`
+	Url              string `env:"DB_URL, default=mongodb://mongodb:27017"`
+	Database         string `env:"DB_DBNAME, default=medods_test_assignment"`
+	TokensCollection string `env:"DB_TOKENS_COLNAME, default=tokens"`
 }

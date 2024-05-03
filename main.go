@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"marat/medodsauth/api"
 	"marat/medodsauth/config"
+	"marat/medodsauth/storage"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +21,10 @@ func main() {
 	if err := config.ReadConfig(appCtx); err != nil {
 		panic(err)
 
+	}
+
+	if err := storage.SetupMongoClient(appCtx, &config.Conf.Storage); err != nil {
+		panic(err)
 	}
 
 	if config.Conf.Mode.IsDebug() {

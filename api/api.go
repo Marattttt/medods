@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 )
 
@@ -23,12 +24,14 @@ type requestData struct {
 	conf   *config.Config
 	logger *slog.Logger
 	reqId  uint64
+	auth   auth.ApiAuthenticator
+	tokens storage.TokenStorage
 }
 
 func Server(conf *config.Config) *http.Server {
 	mux := chi.NewMux()
 
-	mux.Use(addRequestData, logRequestStatus)
+	mux.Use(addRequestData, logRequestStatus, middleware.Recoverer)
 
 	// Might be better to set an http mnethod, but it was not specified, so did not set any
 	mux.Handle("/login", http.HandlerFunc(HandleLogin))
@@ -56,9 +59,7 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authenticator := auth.NewDefault(config.Conf, storage.IMS, reqData.logger)
-
-	tokenPair := authenticator.GeneratePair(id)
+	tokenPair := reqData.auth.GeneratePair(ctx, id)
 
 	if tokenPair == nil {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -75,15 +76,14 @@ func HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		reqData = ctx.Value(requestData{}).(requestData)
 	)
 
-	hash := r.URL.Query().Get("token")
-	if hash == "" {
+	var request RefreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse{"refresh query param not found"})
+		json.NewEncoder(w).Encode(ErrorResponse{"access and refresh tokens required in body"})
 		return
 	}
 
-	authorizer := auth.NewDefault(config.Conf, storage.IMS, reqData.logger)
-	pair, err := authorizer.Refresh(hash)
+	pair, err := reqData.auth.Refresh(ctx, auth.TokenPair{Access: request.Access, Refresh: request.Refresh})
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(ErrorResponse{err.Error()})
@@ -115,8 +115,7 @@ func HandleTokenValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authorizer := auth.NewDefault(reqData.conf, storage.IMS, reqData.logger)
-	id, err := authorizer.Validate(parts[1])
+	token, err := reqData.auth.ValidateAccessTok(parts[1])
 	if err != nil {
 		if errors.Is(err, auth.ErrTokenExprired) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -129,5 +128,12 @@ func HandleTokenValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(TokenStatusResponse{"Valid", id.String()})
+	hashedToken, err := auth.HashAccessTok(token)
+	if err != nil {
+		reqData.logger.Error("Could not hash access token", slog.String("err", err.Error()))
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse{"Something went wrong"})
+		return
+	}
+	json.NewEncoder(w).Encode(TokenStatusResponse{"Valid", hashedToken})
 }

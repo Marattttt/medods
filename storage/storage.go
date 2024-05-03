@@ -1,57 +1,24 @@
 package storage
 
 import (
+	"context"
 	"fmt"
-	"marat/medodsauth/models"
-	"time"
 )
 
 var (
-	ErrNotFound = fmt.Errorf("Not found")
-	ErrExpired  = fmt.Errorf("Expired")
-	IMS         = new(InMemoryStorage)
+	ErrNotFound  = fmt.Errorf("Not found")
+	ErrNoEffect  = fmt.Errorf("Operation made no effect")
+	ErrInvalidId = fmt.Errorf("Invalid id")
 )
 
+type RefreshToken struct {
+	Id string `bson:"_id,omitempty"`
+	// hexadecimal encoding
+	Hash string `bson:"hash,omitempty"`
+}
+
 type TokenStorage interface {
-	Save(hash string, token models.RefreshToken) error
-	Get(hash string) (models.RefreshToken, error)
-	Delete(hash string)
-}
-
-type InMemoryStorage struct {
-	Tokens map[string]models.RefreshToken
-}
-
-func (ims *InMemoryStorage) Save(hash string, token models.RefreshToken) error {
-	if ims.Tokens == nil {
-		ims.Tokens = make(map[string]models.RefreshToken)
-	}
-	ims.Tokens[hash] = token
-
-	return nil
-}
-
-func (ims *InMemoryStorage) Delete(hash string) {
-	if ims.Tokens == nil {
-		ims.Tokens = make(map[string]models.RefreshToken)
-	}
-	delete(ims.Tokens, hash)
-}
-
-func (ims *InMemoryStorage) Get(hash string) (models.RefreshToken, error) {
-	if ims.Tokens == nil {
-		ims.Tokens = make(map[string]models.RefreshToken)
-	}
-	found, ok := ims.Tokens[hash]
-
-	if !ok {
-		return models.RefreshToken{}, ErrNotFound
-	}
-
-	if time.Now().After(found.ExpiresAt) {
-		delete(ims.Tokens, hash)
-		return models.RefreshToken{}, ErrExpired
-	}
-
-	return found, nil
+	Get(ctx context.Context, id string) (RefreshToken, error)
+	Save(ctx context.Context, hash []byte) (id string, err error)
+	Delete(ctx context.Context, id string) error
 }
